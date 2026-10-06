@@ -12,6 +12,7 @@ pub mod glasgow;
 pub mod jlink;
 pub mod jtag;
 pub mod list;
+pub mod profile;
 pub(crate) mod queue;
 mod selector;
 pub mod sifliuart;
@@ -47,6 +48,7 @@ pub use jtag::chain::ChainParams;
 pub use jtag::{
     BitbangJtag, JtagBatch, JtagChain, JtagChainAccess, JtagChainState, JtagOp, JtagProbe, TapState,
 };
+pub use profile::{ProbeProfile, ProbeProfileError};
 pub use queue::{
     Batch, BatchError, BatchExecutionError, ErasedBatch, Handle, HandleId, JtagQueue, Results,
 };
@@ -514,6 +516,15 @@ impl Probe {
         self.inner.target_reset_deassert()
     }
 
+    /// Applies a [`ProbeProfile`], which describes how the probe's adapter is wired.
+    ///
+    /// The profile replaces any built-in profile the probe matched when it was opened. Probes
+    /// that are not configurable return [`DebugProbeError::NotImplemented`].
+    pub fn apply_profile(&mut self, profile: &ProbeProfile) -> Result<(), DebugProbeError> {
+        tracing::debug!("Applying probe profile '{}'", profile.name);
+        self.inner.apply_profile(profile)
+    }
+
     /// Configure protocol speed to use in kHz
     pub fn set_speed(&mut self, speed_khz: u32) -> Result<u32, DebugProbeError> {
         if !self.attached {
@@ -742,6 +753,16 @@ pub trait DebugProbe: Any + Send + fmt::Debug {
 
     /// This should deassert the reset pin of the target via debug probe.
     fn target_reset_deassert(&mut self) -> Result<(), DebugProbeError>;
+
+    /// Applies a [`ProbeProfile`], which describes how the probe's adapter is wired.
+    ///
+    /// This can be called before or after [`DebugProbe::attach`]. The default implementation
+    /// returns [`DebugProbeError::NotImplemented`].
+    fn apply_profile(&mut self, _profile: &ProbeProfile) -> Result<(), DebugProbeError> {
+        Err(DebugProbeError::NotImplemented {
+            function_name: "apply_profile",
+        })
+    }
 
     /// Selects the transport protocol to be used by the debug probe.
     fn select_protocol(&mut self, protocol: WireProtocol) -> Result<(), DebugProbeError>;

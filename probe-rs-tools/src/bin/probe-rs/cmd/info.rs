@@ -95,6 +95,7 @@ impl Cmd {
                     connect_under_reset: self.common.connect_under_reset,
                     dry_run: self.common.dry_run,
                     scan_chain: self.scan_chain.clone(),
+                    probe_profile: self.common.probe_profile.clone(),
                 };
 
                 let result = client

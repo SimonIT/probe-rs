@@ -18,6 +18,7 @@ use crate::{
         ProbeCreationError, ProbeFactory, SwdProbe, SwdSettings, WireProtocol,
         jtag::{Step, TapState, distribute_captures, walk_batch},
         list::{ProbeListItem, usb_probe_accessibility},
+        profile::{FtdiPins, FtdiProfile, ProbeProfile, SignalLevel},
         queue::{BatchExecutionError, Results},
         swd::output_levels,
     },
@@ -49,6 +50,16 @@ struct JtagAdapter {
     in_bit_counts: Vec<usize>,
     in_bits: BitVec,
     ftdi: FtdiProperties,
+
+    /// The wiring of the adapter, from a matching built-in or explicitly applied
+    /// [`ProbeProfile`].
+    profile: Option<(String, FtdiProfile)>,
+
+    /// The pin state last written to the adapter, so that changing a signal doesn't disturb the
+    /// other pins. Only valid while `attached` is set.
+    pins: FtdiPins,
+
+    attached: bool,
 }
 
 impl JtagAdapter {
@@ -87,6 +98,16 @@ impl JtagAdapter {
 
         let ftdi = FtdiProperties::try_from((ftdi, device.chip_type()))?;
 
+        let profile = ProbeProfile::builtin_for_usb(
+            device.vendor_id(),
+            device.product_id(),
+            device.product_string(),
+        )
+        .and_then(|profile| Some((profile.name.clone(), profile.ftdi.clone()?)));
+        if let Some((name, _)) = &profile {
+            tracing::debug!("Using built-in probe profile '{name}'");
+        }
+
         Ok(Self {
             device,
             speed_khz: 1000,
@@ -94,6 +115,9 @@ impl JtagAdapter {
             in_bit_counts: vec![],
             in_bits: BitVec::new(),
             ftdi,
+            profile,
+            pins: DEFAULT_LAYOUT,
+            attached: false,
         })
     }
 
@@ -107,8 +131,8 @@ impl JtagAdapter {
         let mut junk = vec![];
         let _ = self.device.read_to_end(&mut junk);
 
-        let (output, direction) = self.pin_layout();
-        self.device.set_pins(output, direction)?;
+        self.attached = true;
+        self.set_pins(self.layout_init())?;
 
         self.apply_clock_speed(self.speed_khz)?;
 
@@ -117,26 +141,63 @@ impl JtagAdapter {
         Ok(())
     }
 
-    fn pin_layout(&self) -> (u16, u16) {
-        let (output, direction) = match (
-            self.device.vendor_id(),
-            self.device.product_id(),
-            self.device.product_string().unwrap_or(""),
-        ) {
-            // Digilent HS3
-            (0x0403, 0x6014, "Digilent USB Device") => (0x2088, 0x308b),
-            // Digilent HS2
-            (0x0403, 0x6014, "Digilent Adept USB Device") => (0x00e8, 0x60eb),
-            // Digilent HS1
-            (0x0403, 0x6010, "Digilent Adept USB Device") => (0x0088, 0x008b),
-            // Built-in Digilent HS1 (on-board)
-            (0x0403, 0x6010, "Digilent USB Device") => (0x0088, 0x008b),
-            // Other devices:
-            // TMS starts high
-            // TMS, TDO and TCK are outputs
-            _ => (0x0008, 0x000b),
+    fn layout_init(&self) -> FtdiPins {
+        self.profile
+            .as_ref()
+            .map_or(DEFAULT_LAYOUT, |(_, profile)| profile.layout_init)
+    }
+
+    fn set_pins(&mut self, pins: FtdiPins) -> Result<(), FtdiError> {
+        self.device.set_pins(pins.data, pins.direction)?;
+        self.pins = pins;
+        Ok(())
+    }
+
+    fn apply_profile(&mut self, profile: &ProbeProfile) -> Result<(), DebugProbeError> {
+        let Some(ftdi) = &profile.ftdi else {
+            return Err(DebugProbeError::Other(format!(
+                "The probe profile '{}' has no `ftdi` section",
+                profile.name
+            )));
         };
-        (output, direction)
+
+        self.profile = Some((profile.name.clone(), ftdi.clone()));
+        if self.attached {
+            self.set_pins(ftdi.layout_init)?;
+        }
+        Ok(())
+    }
+
+    /// Returns whether the profile defines a reset signal.
+    fn has_reset_signals(&self) -> bool {
+        self.profile.as_ref().is_some_and(|(_, profile)| {
+            profile.signals.nsrst.is_some() || profile.signals.ntrst.is_some()
+        })
+    }
+
+    /// Asserts or deasserts the reset signals (nSRST and nTRST) defined by the profile.
+    fn set_reset_signals(&mut self, asserted: bool) -> Result<(), DebugProbeError> {
+        if !self.attached {
+            return Err(DebugProbeError::NotAttached);
+        }
+        let Some((_, profile)) = &self.profile else {
+            return Ok(());
+        };
+
+        let mut pins = self.pins;
+        for signal in [&profile.signals.nsrst, &profile.signals.ntrst]
+            .into_iter()
+            .flatten()
+        {
+            let level = if asserted {
+                SignalLevel::Low
+            } else {
+                signal.deasserted_level()
+            };
+            signal.apply(level, &mut pins);
+        }
+        self.set_pins(pins)?;
+        Ok(())
     }
 
     fn speed_khz(&self) -> u32 {
@@ -457,23 +518,36 @@ impl DebugProbe for FtdiProbe {
     }
 
     fn target_reset(&mut self) -> Result<(), DebugProbeError> {
-        // TODO we could add this by using a GPIO. However, different probes may connect
-        // different pins (if any) to the reset line, so we would need to make this configurable.
-        Err(DebugProbeError::NotImplemented {
-            function_name: "target_reset",
-        })
+        if !self.adapter.has_reset_signals() {
+            return Err(DebugProbeError::NotImplemented {
+                function_name: "target_reset",
+            });
+        }
+        self.adapter.set_reset_signals(true)?;
+        std::thread::sleep(Duration::from_millis(10));
+        self.adapter.set_reset_signals(false)
     }
 
     fn target_reset_assert(&mut self) -> Result<(), DebugProbeError> {
-        Err(DebugProbeError::NotImplemented {
-            function_name: "target_reset_assert",
-        })
+        if !self.adapter.has_reset_signals() {
+            return Err(DebugProbeError::NotImplemented {
+                function_name: "target_reset_assert",
+            });
+        }
+        self.adapter.set_reset_signals(true)
     }
 
     fn target_reset_deassert(&mut self) -> Result<(), DebugProbeError> {
-        Err(DebugProbeError::NotImplemented {
-            function_name: "target_reset_deassert",
-        })
+        if !self.adapter.has_reset_signals() {
+            return Err(DebugProbeError::NotImplemented {
+                function_name: "target_reset_deassert",
+            });
+        }
+        self.adapter.set_reset_signals(false)
+    }
+
+    fn apply_profile(&mut self, profile: &ProbeProfile) -> Result<(), DebugProbeError> {
+        self.adapter.apply_profile(profile)
     }
 
     fn select_protocol(&mut self, protocol: WireProtocol) -> Result<(), DebugProbeError> {
@@ -579,6 +653,13 @@ impl BitbangSwd for FtdiProbe {
         &self.swd_settings
     }
 }
+
+/// The pin layout of adapters without a profile: TMS starts high, and TCK, TDI and TMS are
+/// outputs.
+const DEFAULT_LAYOUT: FtdiPins = FtdiPins {
+    data: 0x0008,
+    direction: 0x000b,
+};
 
 /// Known properties associated to particular FTDI chip types.
 #[derive(Debug)]

@@ -120,6 +120,7 @@ pub async fn attach_probe(
         allow_erase_all: probe_options.allow_erase_all,
         resume_target,
         wait_for_probe: probe_options.attach_timeout,
+        probe_profile: probe_options.probe_profile,
     }))
     .await?;
 

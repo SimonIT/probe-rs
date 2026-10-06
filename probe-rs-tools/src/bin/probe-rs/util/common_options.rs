@@ -13,10 +13,11 @@ use probe_rs::{
     integration::FakeProbe,
     probe::{
         DebugProbeError, DebugProbeInfo, DebugProbeSelector, Probe, ProbeCreationError,
-        WireProtocol,
+        ProbeProfile, ProbeProfileError, WireProtocol,
         list::{Accessibility, Lister},
     },
 };
+use probe_rs_rpc::probe::ProbeProfileSource;
 use serde::{Deserialize, Serialize};
 
 /// How long to wait before another attempt at a probe that another process
@@ -164,6 +165,20 @@ pub struct ProbeOptions {
     /// Example: '--probe 0403:6010-1' selects Channel B.
     #[arg(long, env = "PROBE_RS_PROBE", help_heading = "PROBE CONFIGURATION")]
     pub probe: Option<DebugProbeSelector>,
+    /// The probe profile that describes how the probe's adapter is wired.
+    ///
+    /// Either the name of a built-in profile or the path to a profile YAML file.
+    /// Configurable probes (FTDI) with a known VID/PID and product string use a
+    /// matching built-in profile automatically.
+    #[arg(
+        long,
+        value_name = "name or path",
+        value_parser = parse_probe_profile,
+        env = "PROBE_RS_PROBE_PROFILE",
+        help_heading = "PROBE CONFIGURATION"
+    )]
+    #[serde(default)]
+    pub probe_profile: Option<ProbeProfileSource>,
     /// The protocol speed in kHz.
     #[arg(long, env = "PROBE_RS_SPEED", help_heading = "PROBE CONFIGURATION")]
     pub speed: Option<u32>,
@@ -201,6 +216,41 @@ pub struct ProbeOptions {
     )]
     #[serde(default)]
     pub attach_timeout: Option<Duration>,
+}
+
+/// Parses `--probe-profile`: a path to a profile file, or the name of a built-in profile.
+///
+/// The file is read here, so that a remote server receives the profile itself.
+fn parse_probe_profile(value: &str) -> Result<ProbeProfileSource, String> {
+    let path = std::path::Path::new(value);
+    if path.is_file() {
+        let yaml = std::fs::read_to_string(path)
+            .map_err(|error| format!("failed to read '{value}': {error}"))?;
+        ProbeProfile::from_yaml(&yaml).map_err(|error| error.to_string())?;
+        return Ok(ProbeProfileSource::Yaml(yaml));
+    }
+
+    match ProbeProfile::builtin(value) {
+        Ok(profile) => Ok(ProbeProfileSource::Builtin(profile.name.clone())),
+        Err(_) => {
+            let builtins = ProbeProfile::builtins()
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "'{value}' is neither a file nor a built-in probe profile ({builtins})"
+            ))
+        }
+    }
+}
+
+/// Loads the [`ProbeProfile`] described by `source`.
+pub fn load_probe_profile(source: &ProbeProfileSource) -> Result<ProbeProfile, ProbeProfileError> {
+    match source {
+        ProbeProfileSource::Builtin(name) => ProbeProfile::builtin(name).cloned(),
+        ProbeProfileSource::Yaml(yaml) => ProbeProfile::from_yaml(yaml),
+    }
 }
 
 impl ProbeOptions {
@@ -364,6 +414,18 @@ impl<'r> LoadedProbeOptions<'r> {
         } else {
             self.open_probe(lister)?
         };
+
+        if let Some(source) = &self.0.probe_profile
+            && !self.0.dry_run
+        {
+            let profile = load_probe_profile(source)?;
+            probe.apply_profile(&profile).map_err(|error| {
+                OperationError::FailedToApplyProbeProfile {
+                    source: error,
+                    name: profile.name.clone(),
+                }
+            })?;
+        }
 
         if let Some(protocol) = self.0.protocol {
             // Select protocol and speed
@@ -576,6 +638,16 @@ pub enum OperationError {
 
     #[error("Failed to open the debug probe.")]
     FailedToOpenProbe(#[from] DebugProbeError),
+
+    #[error("Failed to load the probe profile.")]
+    InvalidProbeProfile(#[from] ProbeProfileError),
+
+    #[error("Failed to apply the probe profile '{name}'.")]
+    FailedToApplyProbeProfile {
+        #[source]
+        source: DebugProbeError,
+        name: String,
+    },
 
     #[error("{} probes were found: {}", .list.len(), print_list(.list))]
     MultipleProbesFound { list: Vec<DebugProbeInfo> },
@@ -815,6 +887,7 @@ mod tests {
             connect_under_reset: false,
             dry_run: false,
             allow_erase_all: false,
+            probe_profile: None,
             attach_timeout,
         }
     }
@@ -855,6 +928,41 @@ mod tests {
 
         assert!(options.attach_probe(&handle).is_err());
         assert_eq!(lister.attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn probe_profile_is_rejected_by_a_probe_that_is_not_configurable() {
+        let (_lister, handle) = busy_lister(0);
+        let mut registry = Registry::from_builtin_families();
+        let mut options = probe_options(None);
+        options.probe_profile = Some(ProbeProfileSource::Builtin("axm0432".into()));
+        let options = options.load(&mut registry).unwrap();
+
+        assert!(matches!(
+            options.attach_probe(&handle),
+            Err(OperationError::FailedToApplyProbeProfile { .. })
+        ));
+    }
+
+    #[test]
+    fn probe_profile_argument() {
+        assert_eq!(
+            parse_probe_profile("AXM0432"),
+            Ok(ProbeProfileSource::Builtin("axm0432".into()))
+        );
+        assert!(parse_probe_profile("no-such-profile").is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.yaml");
+        let yaml = "name: custom\nftdi:\n  layout_init: { data: 0x0008, direction: 0x000b }\n";
+        std::fs::write(&path, yaml).unwrap();
+        assert_eq!(
+            parse_probe_profile(path.to_str().unwrap()),
+            Ok(ProbeProfileSource::Yaml(yaml.into()))
+        );
+
+        std::fs::write(&path, "name: broken\nftdi: {}\n").unwrap();
+        assert!(parse_probe_profile(path.to_str().unwrap()).is_err());
     }
 
     #[test]

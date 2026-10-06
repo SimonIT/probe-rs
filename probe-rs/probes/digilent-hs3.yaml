@@ -1,0 +1,10 @@
+name: digilent-hs3
+description: Digilent JTAG-HS3
+usb:
+- vendor_id: 0x0403
+  product_id: 0x6014
+  product: Digilent USB Device
+ftdi:
+  layout_init:
+    data: 0x2088
+    direction: 0x308b

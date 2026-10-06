@@ -1,0 +1,14 @@
+name: digilent-hs1
+description: Digilent JTAG-HS1, also built into some Digilent boards
+usb:
+- vendor_id: 0x0403
+  product_id: 0x6010
+  product: Digilent Adept USB Device
+# On-board variant
+- vendor_id: 0x0403
+  product_id: 0x6010
+  product: Digilent USB Device
+ftdi:
+  layout_init:
+    data: 0x0088
+    direction: 0x008b

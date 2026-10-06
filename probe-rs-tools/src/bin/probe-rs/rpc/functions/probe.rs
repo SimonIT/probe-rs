@@ -386,6 +386,7 @@ mod tests {
                 allow_erase_all: false,
                 resume_target: false,
                 wait_for_probe,
+                probe_profile: None,
             })
             .await;
 
@@ -558,6 +559,7 @@ pub(crate) mod convert {
                 cycle_power: false,
                 dry_run: request.dry_run,
                 allow_erase_all: request.allow_erase_all,
+                probe_profile: request.probe_profile.clone(),
                 // `attach_impl` runs the wait, so that it can also retry a
                 // probe that has dropped out of the probe list, and so that the
                 // client can cancel it.

@@ -113,6 +113,15 @@ pub struct DebugProbeSelector {
     pub usb_location: Option<(String, u8)>,
 }
 
+/// A probe profile to apply after opening the probe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub enum ProbeProfileSource {
+    /// A built-in profile, by name.
+    Builtin(String),
+    /// The YAML source of a profile, read by the client.
+    Yaml(String),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct AttachRequest {
     pub chip: Option<String>,
@@ -124,6 +133,7 @@ pub struct AttachRequest {
     pub allow_erase_all: bool,
     pub resume_target: bool,
     pub wait_for_probe: Option<Duration>,
+    pub probe_profile: Option<ProbeProfileSource>,
 }
 
 pub type AttachResponse = RpcResult<AttachResult>;

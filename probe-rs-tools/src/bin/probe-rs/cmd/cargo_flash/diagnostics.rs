@@ -20,6 +20,16 @@ pub(crate) fn render_diagnostics(registry: &Registry, error: OperationError) {
             error.to_string(),
             vec![],
         ),
+        OperationError::InvalidProbeProfile(_e) => (
+            error.to_string(),
+            vec![],
+        ),
+        OperationError::FailedToApplyProbeProfile { .. } => (
+            error.to_string(),
+            vec![
+                "Probe profiles are only supported by configurable probes, such as FTDI based adapters.".into(),
+            ],
+        ),
         OperationError::NoProbesFound => (
             error.to_string(),
             vec![

@@ -1,0 +1,10 @@
+name: digilent-hs2
+description: Digilent JTAG-HS2
+usb:
+- vendor_id: 0x0403
+  product_id: 0x6014
+  product: Digilent Adept USB Device
+ftdi:
+  layout_init:
+    data: 0x00e8
+    direction: 0x60eb

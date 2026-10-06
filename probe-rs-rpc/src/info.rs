@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chip::{JEP106Code, MemoryRegion};
 use crate::core_ops::WireCoreType;
-use crate::probe::{DebugProbeEntry, WireProtocol};
+use crate::probe::{DebugProbeEntry, ProbeProfileSource, WireProtocol};
 use crate::{Key, RpcResult, Session};
 
 /// Absolute flash sector range for GDB memory-map XML (`blocksize`).
@@ -50,6 +50,7 @@ pub struct TargetInfoRequest {
     /// directly. For example, `[5]` specifies a single-TAP chain with IR length 5.
     #[serde(default)]
     pub scan_chain: Vec<u8>,
+    pub probe_profile: Option<ProbeProfileSource>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
